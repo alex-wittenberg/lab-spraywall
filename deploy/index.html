@@ -1207,9 +1207,28 @@
           notes: notes || problemAttempts.notes
         };
 
-        // Apply rating if provided
+        // Apply rating directly to updatedProblem (don't call rateProblem to avoid race condition)
         if (rating > 0) {
-          await rateProblem(problemId, rating);
+          if (!Array.isArray(updatedProblem.ratings)) {
+            updatedProblem.ratings = [];
+          }
+          const existingIndex = updatedProblem.ratings.findIndex(r =>
+            typeof r === 'object' && r.userId === currentUserId
+          );
+          if (existingIndex > -1) {
+            updatedProblem.ratings[existingIndex] = { userId: currentUserId, rating };
+          } else {
+            updatedProblem.ratings.push({ userId: currentUserId, rating });
+          }
+          const ratingValues = updatedProblem.ratings.map(r => typeof r === 'object' ? r.rating : r);
+          updatedProblem.averageRating = ratingValues.length > 0
+            ? ratingValues.reduce((a, b) => a + b, 0) / ratingValues.length
+            : 0;
+
+          // Save user's rating
+          const newUserRatings = { ...userRatings, [problemId]: rating };
+          setUserRatings(newUserRatings);
+          await window.storage.set(`user-ratings:${currentUserId}`, JSON.stringify(newUserRatings));
         }
 
         // Always record grade vote when sending (even if same as setter's grade)
@@ -3445,7 +3464,7 @@
                       <Icon name="Star" size={16} className={selectedProblem.averageRating > 0 ? 'text-yellow-500' : ''} />
                       <span className="font-bold">
                         {selectedProblem.averageRating > 0
-                          ? `${selectedProblem.averageRating.toFixed(1)} (${selectedProblem.ratings.length} ${selectedProblem.ratings.length === 1 ? 'vote' : 'votes'})`
+                          ? selectedProblem.averageRating.toFixed(1)
                           : 'Not rated'}
                       </span>
                     </button>
@@ -4250,7 +4269,7 @@
                                       <Icon name="Star" size={16} className={(problem.averageRating || 0) > 0 ? 'text-yellow-500' : ''} />
                                       <span className="font-bold">
                                         {(problem.averageRating || 0) > 0
-                                          ? `${problem.averageRating.toFixed(1)} (${(problem.ratings || []).length} ratings)`
+                                          ? problem.averageRating.toFixed(1)
                                           : 'Not rated yet'}
                                       </span>
                                     </div>
