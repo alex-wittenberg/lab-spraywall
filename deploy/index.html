@@ -338,10 +338,10 @@
 
       // Scroll to image when navigating to detail view
       useEffect(() => {
-        if (activeTab === 'detail' && detailImageRef.current) {
-          // Small delay to ensure DOM is updated
+        if (activeTab === 'detail') {
+          // Scroll to top of page when viewing problem detail
           setTimeout(() => {
-            detailImageRef.current?.scrollIntoView({ behavior: 'instant', block: 'start' });
+            window.scrollTo(0, 0);
           }, 50);
         }
       }, [activeTab, selectedProblem]);
