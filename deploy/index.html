@@ -5445,6 +5445,8 @@
                     <div className="mb-6">
                       <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400 mb-3">Merge Users</h3>
                       <p className="text-xs text-zinc-500 mb-3">Transfer all data from an old user account to a new one (for migrating users to Google auth).</p>
+
+                      {/* Dropdown selection */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
                         <div>
                           <label className="block text-xs text-zinc-500 mb-1">Old User (to merge FROM)</label>
@@ -5471,14 +5473,51 @@
                           </select>
                         </div>
                       </div>
+
+                      {/* Manual ID input (for users not in dropdown) */}
+                      <details className="mb-3">
+                        <summary className="text-xs text-amber-500 cursor-pointer hover:text-amber-400">
+                          Or enter user IDs manually (for users not in dropdown)
+                        </summary>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3 p-3 bg-zinc-950 rounded border border-zinc-800">
+                          <div>
+                            <label className="block text-xs text-zinc-500 mb-1">Old User ID</label>
+                            <input
+                              type="text"
+                              id="mergeOldUserManual"
+                              placeholder="Paste old user ID..."
+                              className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-sm font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs text-zinc-500 mb-1">New User ID</label>
+                            <input
+                              type="text"
+                              id="mergeNewUserManual"
+                              placeholder="Paste new user ID..."
+                              className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-sm font-mono"
+                            />
+                          </div>
+                        </div>
+                      </details>
+
                       <button
                         onClick={() => {
-                          const oldUser = document.getElementById('mergeOldUser').value;
-                          const newUser = document.getElementById('mergeNewUser').value;
+                          // Check manual inputs first, then dropdowns
+                          const oldUserManual = document.getElementById('mergeOldUserManual')?.value?.trim();
+                          const newUserManual = document.getElementById('mergeNewUserManual')?.value?.trim();
+                          const oldUserDropdown = document.getElementById('mergeOldUser').value;
+                          const newUserDropdown = document.getElementById('mergeNewUser').value;
+
+                          const oldUser = oldUserManual || oldUserDropdown;
+                          const newUser = newUserManual || newUserDropdown;
+
                           if (oldUser && newUser && oldUser !== newUser) {
-                            mergeUsers(oldUser, newUser);
+                            if (confirm(`Merge user ${oldUser.substring(0, 12)}... INTO ${newUser.substring(0, 12)}...?\n\nThis will transfer all problems, sends, and comments from the old user to the new user, then delete the old user account.`)) {
+                              mergeUsers(oldUser, newUser);
+                            }
                           } else {
-                            alert('Please select two different users');
+                            alert('Please select or enter two different users');
                           }
                         }}
                         className="bg-red-600 hover:bg-red-500 px-4 py-2 rounded font-bold uppercase text-sm transition"
