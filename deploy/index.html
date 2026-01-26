@@ -28,6 +28,7 @@
   <!-- Firebase SDK -->
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
 
   <!-- Styles -->
   <link rel="stylesheet" href="styles.css">
@@ -49,6 +50,11 @@
 
     firebase.initializeApp(firebaseConfig);
     const db = firebase.firestore();
+    const auth = firebase.auth();
+    const googleProvider = new firebase.auth.GoogleAuthProvider();
+
+    // Admin emails - these users have full admin access
+    const ADMIN_EMAILS = ['alexanderbwittenberg@gmail.com'];
 
     // Firestore-backed storage layer (shared across all users)
     const storage = {
@@ -186,6 +192,14 @@
       const [welcomeName, setWelcomeName] = useState('');
       const [friendSearch, setFriendSearch] = useState('');
 
+      // Auth state
+      const [authUser, setAuthUser] = useState(null);
+      const [authLoading, setAuthLoading] = useState(true);
+      const [isAdmin, setIsAdmin] = useState(false);
+      const [showLoginModal, setShowLoginModal] = useState(false);
+      const [bannedUsers, setBannedUsers] = useState([]);
+      const [featuredProblems, setFeaturedProblems] = useState([]);
+
       // New state for enhanced features
       const [selectedProblem, setSelectedProblem] = useState(null);
       const [showHolds, setShowHolds] = useState(true);
@@ -286,6 +300,136 @@
           window.removeEventListener('offline', handleOffline);
         };
       }, []);
+
+      // Firebase Auth listener
+      useEffect(() => {
+        const unsubscribe = auth.onAuthStateChanged(async (user) => {
+          setAuthLoading(true);
+          if (user) {
+            setAuthUser(user);
+            setIsAdmin(ADMIN_EMAILS.includes(user.email));
+
+            // Check if user exists in our system, if not create them
+            const existingUser = allUsers.find(u => u.email === user.email);
+            if (existingUser) {
+              setCurrentUserId(existingUser.id);
+              setCurrentUserName(existingUser.name);
+              localStorage.setItem('user-id', existingUser.id);
+              localStorage.setItem('current-user-name', existingUser.name);
+            } else {
+              // Create new user from Google auth
+              const newUserId = user.uid;
+              const newUserName = user.displayName || user.email.split('@')[0];
+              setCurrentUserId(newUserId);
+              setCurrentUserName(newUserName);
+              localStorage.setItem('user-id', newUserId);
+              localStorage.setItem('current-user-name', newUserName);
+
+              // Add to all users
+              const newUser = {
+                id: newUserId,
+                name: newUserName,
+                email: user.email,
+                photoURL: user.photoURL,
+                joinedAt: new Date().toISOString(),
+                totalSends: 0,
+                highestGrade: null
+              };
+              const updatedUsers = [...allUsers, newUser];
+              setAllUsers(updatedUsers);
+              await window.storage.set('all-users', JSON.stringify(updatedUsers));
+            }
+          } else {
+            setAuthUser(null);
+            setIsAdmin(false);
+            // Clear local user data when signed out
+            setCurrentUserId(null);
+            setCurrentUserName('');
+          }
+          setAuthLoading(false);
+        });
+        return () => unsubscribe();
+      }, [allUsers]);
+
+      // Load banned users and featured problems
+      useEffect(() => {
+        const loadAdminData = async () => {
+          try {
+            const bannedResult = await window.storage.get('banned-users');
+            if (bannedResult) setBannedUsers(JSON.parse(bannedResult.value));
+
+            const featuredResult = await window.storage.get('featured-problems');
+            if (featuredResult) setFeaturedProblems(JSON.parse(featuredResult.value));
+          } catch (e) {
+            console.log('No admin data yet');
+          }
+        };
+        loadAdminData();
+      }, []);
+
+      // Auth functions
+      const signInWithGoogle = async () => {
+        try {
+          await auth.signInWithPopup(googleProvider);
+          setShowLoginModal(false);
+        } catch (error) {
+          console.error('Sign in error:', error);
+          alert('Failed to sign in. Please try again.');
+        }
+      };
+
+      const signOut = async () => {
+        try {
+          await auth.signOut();
+          localStorage.removeItem('user-id');
+          localStorage.removeItem('current-user-name');
+        } catch (error) {
+          console.error('Sign out error:', error);
+        }
+      };
+
+      // Admin functions
+      const banUser = async (userId) => {
+        if (!isAdmin) return;
+        const updated = [...bannedUsers, userId];
+        setBannedUsers(updated);
+        await window.storage.set('banned-users', JSON.stringify(updated));
+      };
+
+      const unbanUser = async (userId) => {
+        if (!isAdmin) return;
+        const updated = bannedUsers.filter(id => id !== userId);
+        setBannedUsers(updated);
+        await window.storage.set('banned-users', JSON.stringify(updated));
+      };
+
+      const featureProblem = async (problemId) => {
+        if (!isAdmin) return;
+        const updated = featuredProblems.includes(problemId)
+          ? featuredProblems.filter(id => id !== problemId)
+          : [...featuredProblems, problemId];
+        setFeaturedProblems(updated);
+        await window.storage.set('featured-problems', JSON.stringify(updated));
+      };
+
+      const deleteProblemAsAdmin = async (problemId) => {
+        if (!isAdmin) return;
+        if (!confirm('Are you sure you want to delete this problem? This cannot be undone.')) return;
+
+        await window.storage.delete(`problem:${problemId}`);
+        setProblems(problems.filter(p => p.id !== problemId));
+        setSelectedProblem(null);
+        setActiveTab('archive');
+      };
+
+      const deleteCommentAsAdmin = async (problemId, commentIndex) => {
+        if (!isAdmin) return;
+        const problemComments = comments[problemId] || [];
+        const updated = problemComments.filter((_, idx) => idx !== commentIndex);
+        const newComments = { ...comments, [problemId]: updated };
+        setComments(newComments);
+        await window.storage.set('all-comments', JSON.stringify(newComments));
+      };
 
       // Load problems from storage on mount
       useEffect(() => {
@@ -2310,12 +2454,65 @@
       };
 
       // Loading screen
-      if (isLoading) {
+      if (isLoading || authLoading) {
         return (
           <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center" style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", sans-serif' }}>
             <div className="text-center">
               <div className="animate-spin rounded-full h-12 w-12 border-4 border-orange-600 border-t-transparent mx-auto mb-4"></div>
               <p className="text-zinc-400 uppercase tracking-wide text-sm">Loading The Lab...</p>
+            </div>
+          </div>
+        );
+      }
+
+      // Login screen if not authenticated
+      if (!authUser) {
+        return (
+          <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center" style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", sans-serif' }}>
+            <div className="text-center p-8 max-w-md">
+              <div className="w-24 h-24 bg-orange-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                <Icon name="Mountain" size={48} />
+              </div>
+              <h1 className="text-4xl font-black uppercase tracking-wider mb-2">The Lab</h1>
+              <p className="text-zinc-400 mb-8">Spray Wall Climbing App</p>
+
+              <button
+                onClick={signInWithGoogle}
+                className="w-full bg-white text-zinc-900 hover:bg-zinc-200 px-6 py-4 rounded-lg font-bold flex items-center justify-center gap-3 transition"
+              >
+                <svg className="w-6 h-6" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                </svg>
+                Sign in with Google
+              </button>
+
+              <p className="text-zinc-500 text-sm mt-6">
+                Sign in to track your sends, create problems, and connect with other climbers.
+              </p>
+            </div>
+          </div>
+        );
+      }
+
+      // Banned user screen
+      if (bannedUsers.includes(currentUserId)) {
+        return (
+          <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center" style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", sans-serif' }}>
+            <div className="text-center p-8 max-w-md">
+              <div className="w-24 h-24 bg-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                <Icon name="Ban" size={48} />
+              </div>
+              <h1 className="text-2xl font-black uppercase tracking-wider mb-4">Account Suspended</h1>
+              <p className="text-zinc-400 mb-6">Your account has been suspended. If you believe this is an error, please contact the administrator.</p>
+              <button
+                onClick={signOut}
+                className="bg-zinc-800 hover:bg-zinc-700 px-6 py-3 rounded font-bold uppercase text-sm transition"
+              >
+                Sign Out
+              </button>
             </div>
           </div>
         );
@@ -3449,7 +3646,7 @@
                     >
                       <Icon name="Share2" size={20} />
                     </button>
-                    {selectedProblem.setterId === currentUserId && (
+                    {(selectedProblem.setterId === currentUserId || isAdmin) && (
                       <>
                         <button
                           onClick={() => setEditingProblem(selectedProblem)}
@@ -3461,7 +3658,7 @@
                         <button
                           onClick={() => {
                             if (confirm('Are you sure you want to delete this problem?')) {
-                              deleteProblem(selectedProblem.id);
+                              isAdmin ? deleteProblemAsAdmin(selectedProblem.id) : deleteProblem(selectedProblem.id);
                             }
                           }}
                           className="p-2 rounded bg-red-900 border border-red-700 hover:bg-red-800 transition"
@@ -3470,6 +3667,19 @@
                           <Icon name="Trash2" size={20} />
                         </button>
                       </>
+                    )}
+                    {isAdmin && (
+                      <button
+                        onClick={() => featureProblem(selectedProblem.id)}
+                        className={`p-2 rounded border transition ${
+                          featuredProblems.includes(selectedProblem.id)
+                            ? 'bg-yellow-600 border-yellow-500 hover:bg-yellow-500'
+                            : 'bg-zinc-800 border-zinc-700 hover:bg-zinc-700'
+                        }`}
+                        title={featuredProblems.includes(selectedProblem.id) ? 'Unfeature Problem' : 'Feature Problem'}
+                      >
+                        <Icon name="Star" size={20} />
+                      </button>
                     )}
                   </div>
                 </div>
@@ -3925,7 +4135,7 @@
                   </div>
 
                   <div className="space-y-4">
-                    {(comments[selectedProblem.id] || []).map(comment => (
+                    {(comments[selectedProblem.id] || []).map((comment, commentIndex) => (
                       <div key={comment.id} className="bg-zinc-950 rounded p-4 border border-zinc-800">
                         <div className="flex items-start justify-between mb-2">
                           <div className="flex items-center gap-2">
@@ -3949,13 +4159,28 @@
                               {new Date(comment.timestamp).toLocaleDateString()}
                             </span>
                           </div>
-                          <button
-                            onClick={() => likeComment(selectedProblem.id, comment.id)}
-                            className={`flex items-center gap-1 text-xs ${comment.likes?.includes(currentUserId) ? 'text-orange-500' : 'text-zinc-500'}`}
-                          >
-                            <Icon name="ThumbsUp" size={14} />
-                            {comment.likes?.length || 0}
-                          </button>
+                          <div className="flex items-center gap-2">
+                            {isAdmin && (
+                              <button
+                                onClick={() => {
+                                  if (confirm('Delete this comment?')) {
+                                    deleteCommentAsAdmin(selectedProblem.id, commentIndex);
+                                  }
+                                }}
+                                className="text-red-500 hover:text-red-400"
+                                title="Delete comment (Admin)"
+                              >
+                                <Icon name="Trash2" size={14} />
+                              </button>
+                            )}
+                            <button
+                              onClick={() => likeComment(selectedProblem.id, comment.id)}
+                              className={`flex items-center gap-1 text-xs ${comment.likes?.includes(currentUserId) ? 'text-orange-500' : 'text-zinc-500'}`}
+                            >
+                              <Icon name="ThumbsUp" size={14} />
+                              {comment.likes?.length || 0}
+                            </button>
+                          </div>
                         </div>
                         {comment.isSpoiler ? (
                           <details className="text-sm">
@@ -4612,23 +4837,46 @@
                         Climber since {new Date(viewingProfile.joinedAt || Date.now()).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
                       </p>
                       {viewingProfile.id !== currentUserId && (
-                        <button
-                          onClick={() => {
-                            if (friends.includes(viewingProfile.id)) {
-                              removeFriend(viewingProfile.id);
-                            } else {
-                              addFriend(viewingProfile.id);
-                            }
-                          }}
-                          className={`px-6 py-3 rounded font-bold uppercase text-sm transition ${
-                            friends.includes(viewingProfile.id)
-                              ? 'bg-zinc-800 hover:bg-zinc-700 border border-zinc-700'
-                              : 'bg-orange-600 hover:bg-orange-500'
-                          }`}
-                        >
-                          <Icon name={friends.includes(viewingProfile.id) ? 'UserMinus' : 'UserPlus'} size={16} className="inline mr-2" />
-                          {friends.includes(viewingProfile.id) ? 'Remove Friend' : 'Add Friend'}
-                        </button>
+                        <div className="flex gap-2 flex-wrap justify-center md:justify-start">
+                          <button
+                            onClick={() => {
+                              if (friends.includes(viewingProfile.id)) {
+                                removeFriend(viewingProfile.id);
+                              } else {
+                                addFriend(viewingProfile.id);
+                              }
+                            }}
+                            className={`px-6 py-3 rounded font-bold uppercase text-sm transition ${
+                              friends.includes(viewingProfile.id)
+                                ? 'bg-zinc-800 hover:bg-zinc-700 border border-zinc-700'
+                                : 'bg-orange-600 hover:bg-orange-500'
+                            }`}
+                          >
+                            <Icon name={friends.includes(viewingProfile.id) ? 'UserMinus' : 'UserPlus'} size={16} className="inline mr-2" />
+                            {friends.includes(viewingProfile.id) ? 'Remove Friend' : 'Add Friend'}
+                          </button>
+                          {isAdmin && (
+                            <button
+                              onClick={() => {
+                                if (bannedUsers.includes(viewingProfile.id)) {
+                                  unbanUser(viewingProfile.id);
+                                } else {
+                                  if (confirm(`Ban ${viewingProfile.name}? They will not be able to use the app.`)) {
+                                    banUser(viewingProfile.id);
+                                  }
+                                }
+                              }}
+                              className={`px-6 py-3 rounded font-bold uppercase text-sm transition ${
+                                bannedUsers.includes(viewingProfile.id)
+                                  ? 'bg-green-600 hover:bg-green-500'
+                                  : 'bg-red-600 hover:bg-red-500'
+                              }`}
+                            >
+                              <Icon name={bannedUsers.includes(viewingProfile.id) ? 'UserCheck' : 'Ban'} size={16} className="inline mr-2" />
+                              {bannedUsers.includes(viewingProfile.id) ? 'Unban User' : 'Ban User'}
+                            </button>
+                          )}
+                        </div>
                       )}
                     </div>
                   </div>
@@ -4825,14 +5073,28 @@
               <div className="space-y-6">
                 {/* Profile Card */}
                 <div className="bg-zinc-900 rounded-lg p-6 border border-zinc-800 shadow-xl">
-                  <h2 className="text-xl font-black uppercase tracking-wide mb-4 pb-3 border-b-2 border-orange-600">
-                    <Icon name="User" size={20} className="inline mr-2" />
-                    My Profile
-                  </h2>
+                  <div className="flex items-center justify-between mb-4 pb-3 border-b-2 border-orange-600">
+                    <h2 className="text-xl font-black uppercase tracking-wide">
+                      <Icon name="User" size={20} className="inline mr-2" />
+                      My Profile
+                      {isAdmin && (
+                        <span className="ml-2 text-xs bg-red-600 text-white px-2 py-1 rounded uppercase">Admin</span>
+                      )}
+                    </h2>
+                    <button
+                      onClick={signOut}
+                      className="text-sm text-zinc-400 hover:text-white flex items-center gap-1 transition"
+                    >
+                      <Icon name="LogOut" size={16} />
+                      Sign Out
+                    </button>
+                  </div>
                   <div className="flex items-center gap-6 mb-6">
                     <div className="relative">
                       <div className="w-24 h-24 bg-zinc-800 rounded-full flex items-center justify-center border-2 border-orange-600 overflow-hidden">
-                        {profilePicture ? (
+                        {authUser?.photoURL ? (
+                          <img src={authUser.photoURL} alt="Profile" className="w-full h-full object-cover" />
+                        ) : profilePicture ? (
                           <img src={profilePicture} alt="Profile" className="w-full h-full object-cover" />
                         ) : (
                           <Icon name="User" size={48} className="text-orange-500" />
