@@ -2554,9 +2554,17 @@
                                 </p>
                               </div>
                             </div>
-                            <span className="bg-zinc-800 px-2 py-1 rounded text-xs font-bold">
-                              {send.suggestedGrade || send.grade}
-                            </span>
+                            <div className="text-right">
+                              <span className="bg-zinc-800 px-2 py-1 rounded text-xs font-bold">
+                                {send.suggestedGrade || send.grade}
+                              </span>
+                              {send.rating > 0 && (
+                                <div className="flex items-center justify-end gap-1 mt-1">
+                                  <span className="text-yellow-500 text-xs">{send.rating}</span>
+                                  <Icon name="Star" size={12} className="text-yellow-500" />
+                                </div>
+                              )}
+                            </div>
                           </div>
                         );
                       });
