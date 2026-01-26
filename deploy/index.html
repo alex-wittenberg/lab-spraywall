@@ -609,13 +609,62 @@
         }
       }, [currentUserId]);
 
-      // Load activity feed
+      // Load activity feed and migrate missing data from user sends
       useEffect(() => {
         const loadActivityFeed = async () => {
           try {
             const result = await window.storage.get('activity-feed');
             if (result) {
-              setActivityFeed(JSON.parse(result.value));
+              let feed = JSON.parse(result.value);
+
+              // Migration: enrich send activities with grade/rating data from all users' sends
+              const usersResult = await window.storage.get('all-users');
+              if (usersResult) {
+                const users = JSON.parse(usersResult.value);
+                const allUserSends = [];
+
+                // Load sends from all users
+                for (const user of users) {
+                  try {
+                    const sendsResult = await window.storage.get(`sends:${user.id}`);
+                    if (sendsResult) {
+                      const sends = JSON.parse(sendsResult.value);
+                      allUserSends.push(...sends.map(s => ({ ...s, userId: user.id })));
+                    }
+                  } catch (e) {
+                    // Skip if no sends for this user
+                  }
+                }
+
+                // Enrich activity feed entries with missing data
+                let updated = false;
+                feed = feed.map(activity => {
+                  if (activity.type === 'send' && (!activity.suggestedGrade || activity.rating === undefined)) {
+                    // Find matching send from user sends
+                    const matchingSend = allUserSends.find(s =>
+                      s.problemId === activity.problemId &&
+                      s.userId === activity.userId &&
+                      Math.abs(new Date(s.timestamp).getTime() - new Date(activity.timestamp).getTime()) < 60000
+                    );
+                    if (matchingSend) {
+                      updated = true;
+                      return {
+                        ...activity,
+                        suggestedGrade: activity.suggestedGrade || matchingSend.suggestedGrade || matchingSend.grade,
+                        rating: activity.rating !== undefined ? activity.rating : (matchingSend.rating || 0)
+                      };
+                    }
+                  }
+                  return activity;
+                });
+
+                // Save updated feed if changes were made
+                if (updated) {
+                  await window.storage.set('activity-feed', JSON.stringify(feed));
+                }
+              }
+
+              setActivityFeed(feed);
             }
           } catch (error) {
             console.log('No activity feed yet');
