@@ -431,6 +431,97 @@
         await window.storage.set('all-comments', JSON.stringify(newComments));
       };
 
+      // Admin merge users function
+      const mergeUsers = async (oldUserId, newUserId) => {
+        if (!isAdmin) return;
+        if (!confirm(`Merge user ${oldUserId} into ${newUserId}? This will transfer all sends, problems, comments, and friends.`)) return;
+
+        try {
+          // 1. Transfer sends
+          const oldSendsResult = await window.storage.get(`sends:${oldUserId}`);
+          const newSendsResult = await window.storage.get(`sends:${newUserId}`);
+          const oldSends = oldSendsResult ? JSON.parse(oldSendsResult.value) : [];
+          const newSends = newSendsResult ? JSON.parse(newSendsResult.value) : [];
+          const mergedSends = [...newSends, ...oldSends.map(s => ({ ...s, userId: newUserId }))];
+          await window.storage.set(`sends:${newUserId}`, JSON.stringify(mergedSends));
+          await window.storage.delete(`sends:${oldUserId}`);
+
+          // 2. Update problems setterId
+          const updatedProblems = problems.map(p => {
+            if (p.setterId === oldUserId) {
+              return { ...p, setterId: newUserId };
+            }
+            return p;
+          });
+          for (const p of updatedProblems) {
+            if (p.setterId === newUserId) {
+              await window.storage.set(`problem:${p.id}`, JSON.stringify(p));
+            }
+          }
+          setProblems(updatedProblems);
+
+          // 3. Update comments
+          const updatedComments = { ...comments };
+          for (const problemId in updatedComments) {
+            updatedComments[problemId] = updatedComments[problemId].map(c => {
+              if (c.userId === oldUserId) {
+                return { ...c, userId: newUserId };
+              }
+              return c;
+            });
+          }
+          setComments(updatedComments);
+          await window.storage.set('all-comments', JSON.stringify(updatedComments));
+
+          // 4. Update activity feed
+          const feedResult = await window.storage.get('activity-feed');
+          if (feedResult) {
+            const feed = JSON.parse(feedResult.value);
+            const updatedFeed = feed.map(a => {
+              if (a.userId === oldUserId) {
+                return { ...a, userId: newUserId };
+              }
+              return a;
+            });
+            await window.storage.set('activity-feed', JSON.stringify(updatedFeed));
+            setActivityFeed(updatedFeed);
+          }
+
+          // 5. Transfer friends
+          const oldFriendsResult = await window.storage.get(`friends:${oldUserId}`);
+          const newFriendsResult = await window.storage.get(`friends:${newUserId}`);
+          const oldFriends = oldFriendsResult ? JSON.parse(oldFriendsResult.value) : [];
+          const newFriends = newFriendsResult ? JSON.parse(newFriendsResult.value) : [];
+          const mergedFriends = [...new Set([...newFriends, ...oldFriends])];
+          await window.storage.set(`friends:${newUserId}`, JSON.stringify(mergedFriends));
+          await window.storage.delete(`friends:${oldUserId}`);
+
+          // 6. Update all-users list (remove old user, keep new)
+          const updatedUsers = allUsers.filter(u => u.id !== oldUserId);
+          setAllUsers(updatedUsers);
+          await window.storage.set('all-users', JSON.stringify(updatedUsers));
+
+          // 7. Update ratings in problems
+          for (const p of updatedProblems) {
+            if (p.ratings && p.ratings.length > 0) {
+              const updatedRatings = p.ratings.map(r => {
+                if (typeof r === 'object' && r.userId === oldUserId) {
+                  return { ...r, userId: newUserId };
+                }
+                return r;
+              });
+              const updatedProblem = { ...p, ratings: updatedRatings };
+              await window.storage.set(`problem:${p.id}`, JSON.stringify(updatedProblem));
+            }
+          }
+
+          alert(`Successfully merged user ${oldUserId} into ${newUserId}`);
+        } catch (error) {
+          console.error('Error merging users:', error);
+          alert('Error merging users. Check console for details.');
+        }
+      };
+
       // Load problems from storage on mount
       useEffect(() => {
         const loadProblems = async () => {
@@ -5331,6 +5422,112 @@
                     </div>
                   )}
                 </div>
+
+                {/* Admin Panel */}
+                {isAdmin && (
+                  <div className="bg-zinc-900 rounded-lg p-6 border border-red-800 shadow-xl">
+                    <h2 className="text-xl font-black uppercase tracking-wide mb-4 pb-3 border-b-2 border-red-600">
+                      <Icon name="Shield" size={20} className="inline mr-2" />
+                      Admin Panel
+                    </h2>
+
+                    {/* Merge Users Tool */}
+                    <div className="mb-6">
+                      <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400 mb-3">Merge Users</h3>
+                      <p className="text-xs text-zinc-500 mb-3">Transfer all data from an old user account to a new one (for migrating users to Google auth).</p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                        <div>
+                          <label className="block text-xs text-zinc-500 mb-1">Old User (to merge FROM)</label>
+                          <select
+                            id="mergeOldUser"
+                            className="w-full bg-zinc-950 border border-zinc-700 rounded px-3 py-2 text-sm"
+                          >
+                            <option value="">Select old user...</option>
+                            {allUsers.map(u => (
+                              <option key={u.id} value={u.id}>{u.name} ({u.id.substring(0, 8)}...)</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-zinc-500 mb-1">New User (to merge INTO)</label>
+                          <select
+                            id="mergeNewUser"
+                            className="w-full bg-zinc-950 border border-zinc-700 rounded px-3 py-2 text-sm"
+                          >
+                            <option value="">Select new user...</option>
+                            {allUsers.map(u => (
+                              <option key={u.id} value={u.id}>{u.name} ({u.id.substring(0, 8)}...)</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          const oldUser = document.getElementById('mergeOldUser').value;
+                          const newUser = document.getElementById('mergeNewUser').value;
+                          if (oldUser && newUser && oldUser !== newUser) {
+                            mergeUsers(oldUser, newUser);
+                          } else {
+                            alert('Please select two different users');
+                          }
+                        }}
+                        className="bg-red-600 hover:bg-red-500 px-4 py-2 rounded font-bold uppercase text-sm transition"
+                      >
+                        Merge Users
+                      </button>
+                    </div>
+
+                    {/* Banned Users List */}
+                    <div className="mb-6">
+                      <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400 mb-3">Banned Users ({bannedUsers.length})</h3>
+                      {bannedUsers.length === 0 ? (
+                        <p className="text-xs text-zinc-500">No banned users</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {bannedUsers.map(userId => {
+                            const user = allUsers.find(u => u.id === userId);
+                            return (
+                              <div key={userId} className="flex items-center justify-between bg-zinc-950 p-3 rounded border border-zinc-800">
+                                <span className="text-sm">{user?.name || userId}</span>
+                                <button
+                                  onClick={() => unbanUser(userId)}
+                                  className="text-xs bg-green-600 hover:bg-green-500 px-3 py-1 rounded font-bold uppercase"
+                                >
+                                  Unban
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Featured Problems List */}
+                    <div>
+                      <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400 mb-3">Featured Problems ({featuredProblems.length})</h3>
+                      {featuredProblems.length === 0 ? (
+                        <p className="text-xs text-zinc-500">No featured problems. Feature problems from the problem detail view.</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {featuredProblems.map(problemId => {
+                            const problem = problems.find(p => p.id === problemId);
+                            return (
+                              <div key={problemId} className="flex items-center justify-between bg-zinc-950 p-3 rounded border border-zinc-800">
+                                <span className="text-sm">{problem?.name || problemId} ({problem?.grade})</span>
+                                <button
+                                  onClick={() => featureProblem(problemId)}
+                                  className="text-xs bg-zinc-700 hover:bg-zinc-600 px-3 py-1 rounded font-bold uppercase"
+                                >
+                                  Unfeature
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Achievements */}
                 <div className="bg-zinc-900 rounded-lg p-6 border border-zinc-800 shadow-xl">
