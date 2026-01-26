@@ -1302,6 +1302,7 @@
             problemName: updatedProblem.name,
             grade: updatedProblem.grade,
             suggestedGrade: suggestedGrade || updatedProblem.grade,
+            rating: rating || 0,
             isFlash,
             message: isFlash ? `flashed "${updatedProblem.name}" (${updatedProblem.grade})` : `sent "${updatedProblem.name}" (${updatedProblem.grade})`
           });
