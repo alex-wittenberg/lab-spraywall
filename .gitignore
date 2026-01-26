@@ -1,0 +1,15 @@
+.DS_Store
+*.log
+node_modules/
+.env
+.claude/
+
+# Old backup files
+TheLabApp.jsx
+spraywall-app.html
+spraywall-app*.jsx
+the-lab-*.html
+the-lab.html
+/index.html
+lab-complete
+wall-photos/
