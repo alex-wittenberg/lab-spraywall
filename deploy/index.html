@@ -644,26 +644,36 @@
         initUser();
       }, []);
 
-      // Load all users and friends
+      // Load all users on mount
       useEffect(() => {
-        const loadUsersAndFriends = async () => {
+        const loadAllUsers = async () => {
           try {
             const usersResult = await window.storage.get('all-users');
             if (usersResult) {
               setAllUsers(JSON.parse(usersResult.value));
             }
-
-            if (currentUserId) {
-              const friendsResult = await window.storage.get(`friends:${currentUserId}`);
-              if (friendsResult) {
-                setFriends(JSON.parse(friendsResult.value));
-              }
-            }
           } catch (error) {
             console.log('No users data yet');
           }
         };
-        loadUsersAndFriends();
+        loadAllUsers();
+      }, []);
+
+      // Load friends when user is set
+      useEffect(() => {
+        const loadFriends = async () => {
+          if (currentUserId) {
+            try {
+              const friendsResult = await window.storage.get(`friends:${currentUserId}`);
+              if (friendsResult) {
+                setFriends(JSON.parse(friendsResult.value));
+              }
+            } catch (error) {
+              console.log('No friends data yet');
+            }
+          }
+        };
+        loadFriends();
       }, [currentUserId]);
 
       // Load comments
