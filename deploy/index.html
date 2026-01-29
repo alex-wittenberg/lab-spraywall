@@ -309,13 +309,28 @@
             setAuthUser(user);
             setIsAdmin(ADMIN_EMAILS.includes(user.email));
 
-            // Check if user exists in our system, if not create them
-            const existingUser = allUsers.find(u => u.email === user.email);
+            // Load users directly from storage to avoid race condition with state
+            let users = [];
+            try {
+              const usersResult = await window.storage.get('all-users');
+              if (usersResult) {
+                users = JSON.parse(usersResult.value);
+              }
+            } catch (error) {
+              console.log('Error loading users:', error);
+            }
+
+            // Check if user exists in our system by email
+            const existingUser = users.find(u => u.email === user.email);
             if (existingUser) {
               setCurrentUserId(existingUser.id);
               setCurrentUserName(existingUser.name);
               localStorage.setItem('user-id', existingUser.id);
               localStorage.setItem('current-user-name', existingUser.name);
+              // Update allUsers state if not already set
+              if (allUsers.length === 0) {
+                setAllUsers(users);
+              }
             } else {
               // Create new user from Google auth
               const newUserId = user.uid;
@@ -335,7 +350,7 @@
                 totalSends: 0,
                 highestGrade: null
               };
-              const updatedUsers = [...allUsers, newUser];
+              const updatedUsers = [...users, newUser];
               setAllUsers(updatedUsers);
               await window.storage.set('all-users', JSON.stringify(updatedUsers));
             }
@@ -349,7 +364,7 @@
           setAuthLoading(false);
         });
         return () => unsubscribe();
-      }, [allUsers]);
+      }, []);
 
       // Load banned users and featured problems
       useEffect(() => {
@@ -618,31 +633,8 @@
         loadUserSends();
       }, [currentUserId]);
 
-      // Initialize current user
-      useEffect(() => {
-        const initUser = async () => {
-          try {
-            const userResult = await window.storage.get('current-user');
-            if (userResult) {
-              const user = JSON.parse(userResult.value);
-              setCurrentUserId(user.id);
-              setCurrentUserName(user.name);
-              // Show welcome modal if user never set a real name
-              if (!user.name || user.name === 'Climber' || user.name.trim() === '') {
-                setShowWelcomeModal(true);
-              }
-            } else {
-              // New user - show welcome modal
-              const newUserId = `user_${Date.now()}`;
-              setCurrentUserId(newUserId);
-              setShowWelcomeModal(true);
-            }
-          } catch (error) {
-            console.error('Error initializing user:', error);
-          }
-        };
-        initUser();
-      }, []);
+      // Note: User initialization is now handled by Firebase Auth listener
+      // The old localStorage-based init is no longer needed since we use Google auth
 
       // Load all users on mount
       useEffect(() => {
