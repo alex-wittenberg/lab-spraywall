@@ -2642,6 +2642,12 @@
               return b.sends - a.sends;
             case 'difficulty':
               return grades.indexOf(b.grade) - grades.indexOf(a.grade);
+            case 'circuits':
+              // Sort by number of circuits the problem is in, then by newest
+              const aCircuits = publicCircuits.filter(c => c.problemIds.includes(a.id)).length;
+              const bCircuits = publicCircuits.filter(c => c.problemIds.includes(b.id)).length;
+              if (bCircuits !== aCircuits) return bCircuits - aCircuits;
+              return new Date(b.createdAt) - new Date(a.createdAt);
             case 'newest':
             default:
               return new Date(b.createdAt) - new Date(a.createdAt);
@@ -4736,6 +4742,7 @@
                         <option value="rating">Highest Rated</option>
                         <option value="popularity">Most Popular</option>
                         <option value="difficulty">Hardest First</option>
+                        <option value="circuits">Public Circuits</option>
                       </select>
                     </div>
 
@@ -4800,23 +4807,23 @@
                   </div>
                 </div>
 
-                {/* Public Circuits Section - shown when searching or always visible */}
-                {searchTerm && publicCircuits.filter(c =>
+                {/* Public Circuits Section - shown when searching or when sort by circuits is selected */}
+                {(sortBy === 'circuits' || (searchTerm && publicCircuits.filter(c =>
                   c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                   c.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
                   c.creatorName.toLowerCase().includes(searchTerm.toLowerCase())
-                ).length > 0 && (
+                ).length > 0)) && publicCircuits.length > 0 && (
                   <div className="bg-zinc-900 rounded-lg p-4 border border-purple-800 shadow-xl">
                     <h3 className="text-sm font-bold uppercase tracking-wider text-purple-400 mb-3 flex items-center gap-2">
                       <Icon name="Users" size={16} />
-                      Matching Circuits
+                      {sortBy === 'circuits' ? 'Public Circuits' : 'Matching Circuits'}
                     </h3>
                     <div className="flex flex-wrap gap-2">
-                      {publicCircuits.filter(c =>
+                      {(sortBy === 'circuits' ? publicCircuits : publicCircuits.filter(c =>
                         c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                         c.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
                         c.creatorName.toLowerCase().includes(searchTerm.toLowerCase())
-                      ).map(circuit => (
+                      )).map(circuit => (
                         <button
                           key={circuit.id}
                           onClick={() => setViewingPublicCircuit(circuit)}
