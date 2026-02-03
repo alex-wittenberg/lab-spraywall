@@ -4807,23 +4807,23 @@
                   </div>
                 </div>
 
-                {/* Public Circuits Section - shown when searching or when sort by circuits is selected */}
-                {(sortBy === 'circuits' || (searchTerm && publicCircuits.filter(c =>
+                {/* Public Circuits Section - shown when searching (not when sort by circuits since that has its own full view) */}
+                {sortBy !== 'circuits' && searchTerm && publicCircuits.filter(c =>
                   c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                   c.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
                   c.creatorName.toLowerCase().includes(searchTerm.toLowerCase())
-                ).length > 0)) && publicCircuits.length > 0 && (
+                ).length > 0 && (
                   <div className="bg-zinc-900 rounded-lg p-4 border border-purple-800 shadow-xl">
                     <h3 className="text-sm font-bold uppercase tracking-wider text-purple-400 mb-3 flex items-center gap-2">
                       <Icon name="Users" size={16} />
-                      {sortBy === 'circuits' ? 'Public Circuits' : 'Matching Circuits'}
+                      Matching Circuits
                     </h3>
                     <div className="flex flex-wrap gap-2">
-                      {(sortBy === 'circuits' ? publicCircuits : publicCircuits.filter(c =>
+                      {publicCircuits.filter(c =>
                         c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                         c.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
                         c.creatorName.toLowerCase().includes(searchTerm.toLowerCase())
-                      )).map(circuit => (
+                      ).map(circuit => (
                         <button
                           key={circuit.id}
                           onClick={() => setViewingPublicCircuit(circuit)}
@@ -4842,7 +4842,73 @@
                 )}
 
                 <div className="space-y-4">
-                  {viewDrafts ? (
+                  {sortBy === 'circuits' ? (
+                    /* Public Circuits Only View */
+                    publicCircuits.length === 0 ? (
+                      <div className="bg-zinc-900 rounded-lg p-12 text-center border border-zinc-800">
+                        <Icon name="Users" size={48} className="mx-auto text-zinc-700 mb-3" />
+                        <p className="text-zinc-500 text-lg font-bold uppercase tracking-wide">No public circuits yet</p>
+                        <p className="text-zinc-600 text-sm mt-2">Be the first to create a circuit!</p>
+                        <button
+                          onClick={() => setShowPublicCircuitModal(true)}
+                          className="mt-4 bg-purple-600 hover:bg-purple-500 px-6 py-3 rounded font-bold uppercase text-sm transition"
+                        >
+                          Create Circuit
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {publicCircuits.map(circuit => {
+                          const circuitProblems = circuit.problemIds.map(id => problems.find(p => p.id === id)).filter(Boolean);
+                          const previewProblems = circuitProblems.slice(0, 4);
+                          return (
+                            <div
+                              key={circuit.id}
+                              onClick={() => setViewingPublicCircuit(circuit)}
+                              className="bg-zinc-900 rounded-lg border border-zinc-800 hover:border-purple-600 cursor-pointer transition overflow-hidden"
+                            >
+                              {/* Preview images grid */}
+                              <div className="grid grid-cols-4 h-24">
+                                {previewProblems.map((problem, idx) => (
+                                  <div key={idx} className="relative overflow-hidden">
+                                    {problem.wallImage ? (
+                                      <img src={problem.wallImage} alt="" className="w-full h-full object-cover" />
+                                    ) : (
+                                      <div className="w-full h-full bg-zinc-800" />
+                                    )}
+                                  </div>
+                                ))}
+                                {[...Array(Math.max(0, 4 - previewProblems.length))].map((_, idx) => (
+                                  <div key={`empty-${idx}`} className="bg-zinc-800" />
+                                ))}
+                              </div>
+                              <div className="p-4">
+                                <div className="flex items-start gap-3">
+                                  <div className="w-3 h-3 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: circuit.color }}></div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center justify-between">
+                                      <h3 className="font-bold text-lg">{circuit.name}</h3>
+                                      {hasUserClearedCircuit(circuit.id) && (
+                                        <span className="text-green-500 flex items-center gap-1 text-xs">
+                                          <Icon name="CheckCircle" size={14} />
+                                          Cleared
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="text-sm text-zinc-400 line-clamp-2 mt-1">{circuit.description}</p>
+                                    <div className="flex items-center gap-3 mt-2 text-xs text-zinc-500">
+                                      <span>{circuit.problemIds.length} problems</span>
+                                      <span>by {circuit.creatorName}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )
+                  ) : viewDrafts ? (
                     drafts.filter(d => d.setterId === currentUserId).length === 0 ? (
                       <div className="bg-zinc-900 rounded-lg p-12 text-center border border-zinc-800">
                         <p className="text-zinc-500 text-lg font-bold uppercase tracking-wide">No drafts saved. Create a draft to work on later!</p>
