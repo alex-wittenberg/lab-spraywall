@@ -12,10 +12,10 @@
   <!-- Favicon -->
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧗</text></svg>">
 
-  <!-- External Dependencies -->
-  <script src="https://unpkg.com/react@18/umd/react.production.min.js" onerror="console.error('Failed to load React')"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" onerror="console.error('Failed to load ReactDOM')"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js" onerror="console.error('Failed to load Babel')"></script>
+  <!-- External Dependencies (pinned versions) -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" onerror="console.error('Failed to load React')"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" onerror="console.error('Failed to load ReactDOM')"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.24.0/babel.min.js" onerror="console.error('Failed to load Babel')"></script>
   <script>
     window.onerror = function(msg, url, line, col, error) {
       document.body.innerHTML = '<div style="padding:20px;color:red;font-family:monospace;"><h2>JavaScript Error:</h2><pre>' + msg + '\nLine: ' + line + '\nColumn: ' + col + '</pre></div>';
@@ -23,7 +23,7 @@
     };
   </script>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://unpkg.com/lucide@0.344.0/dist/umd/lucide.min.js"></script>
 
   <!-- Firebase SDK -->
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
@@ -133,13 +133,37 @@
       }
     };
 
+    // Atomic read-modify-write for shared documents (prevents lost updates)
+    storage.update = async (key, updateFn) => {
+      const docRef = db.collection('data').doc(key);
+      try {
+        await db.runTransaction(async (transaction) => {
+          const doc = await transaction.get(docRef);
+          const current = doc.exists ? JSON.parse(doc.data().value) : null;
+          const updated = updateFn(current);
+          transaction.set(docRef, { value: JSON.stringify(updated), updatedAt: new Date().toISOString() });
+        });
+      } catch (e) {
+        console.error('Transaction failed for', key, e);
+        // Fallback: non-atomic write
+        const result = await storage.get(key);
+        const current = result ? JSON.parse(result.value) : null;
+        const updated = updateFn(current);
+        await storage.set(key, JSON.stringify(updated));
+      }
+    };
+
     // Make storage available globally
     window.storage = storage;
     window.db = db;
   </script>
 
   <script type="text/babel">
-    const { useState, useEffect, useRef, useCallback } = React;
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+    // Generate unique IDs safe from millisecond collisions
+    let _idCounter = 0;
+    const uniqueId = () => `${Date.now()}_${(++_idCounter).toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 
     // Lucide icons
     const Icon = ({ name, size = 24, className = '' }) => {
@@ -266,6 +290,13 @@
       const [showRatingDetails, setShowRatingDetails] = useState(false);
       const [showSendsDetails, setShowSendsDetails] = useState(false);
       const [navigationHistory, setNavigationHistory] = useState([]);
+      const [toasts, setToasts] = useState([]);
+
+      const showToast = useCallback((message, type = 'info') => {
+        const id = Date.now() + Math.random();
+        setToasts(prev => [...prev, { id, message, type }]);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
+      }, []);
 
       const touchStartRef = useRef(null);
       const detailSwipeStartRef = useRef(null);
@@ -304,9 +335,24 @@
         return achievementDefs.filter(a => a.check(userSends, grades, problemsSet, totalComments, friends.length));
       };
 
-      // Online/offline detection
+      // Online/offline detection with queue flush
       useEffect(() => {
-        const handleOnline = () => setIsOnline(true);
+        const handleOnline = () => {
+          setIsOnline(true);
+          // Flush offline queue
+          setOfflineQueue(prev => {
+            if (prev.length > 0) {
+              prev.forEach(async (op) => {
+                try {
+                  await window.storage.set(op.key, op.value);
+                } catch (e) {
+                  console.error('Failed to flush offline op:', op.key, e);
+                }
+              });
+            }
+            return [];
+          });
+        };
         const handleOffline = () => setIsOnline(false);
         window.addEventListener('online', handleOnline);
         window.addEventListener('offline', handleOffline);
@@ -404,7 +450,7 @@
           setShowLoginModal(false);
         } catch (error) {
           console.error('Sign in error:', error);
-          alert('Failed to sign in. Please try again.');
+          showToast('Failed to sign in. Please try again.', 'error');
         }
       };
 
@@ -545,10 +591,10 @@
             }
           }
 
-          alert(`Successfully merged user ${oldUserId} into ${newUserId}`);
+          showToast(`Successfully merged user ${oldUserId} into ${newUserId}`, 'success');
         } catch (error) {
           console.error('Error merging users:', error);
-          alert('Error merging users. Check console for details.');
+          showToast('Error merging users. Check console for details.', 'error');
         }
       };
 
@@ -632,86 +678,98 @@
         loadDrafts();
       }, []);
 
-      // Load user sends from storage (user-specific)
+      // Helper to safely load and parse JSON from storage
+      const loadJSON = async (key) => {
+        try {
+          const result = await window.storage.get(key);
+          return result ? JSON.parse(result.value) : null;
+        } catch (e) {
+          return null;
+        }
+      };
+
+      const loadRaw = async (key) => {
+        try {
+          const result = await window.storage.get(key);
+          return result ? result.value : null;
+        } catch (e) {
+          return null;
+        }
+      };
+
+      // Load global data (not user-specific) on mount
       useEffect(() => {
-        const loadUserSends = async () => {
-          if (!currentUserId) return;
-          try {
-            const result = await window.storage.get(`sends:${currentUserId}`);
-            if (result) {
-              setUserSends(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No user sends yet');
-          }
+        const loadGlobalData = async () => {
+          const [usersData, commentsData, suggestionsData, publicCircuitsData] = await Promise.all([
+            loadJSON('all-users'),
+            loadJSON('all-comments'),
+            loadJSON('grade-suggestions'),
+            loadJSON('public-circuits'),
+          ]);
+
+          if (usersData) setAllUsers(usersData);
+          if (commentsData) setComments(commentsData);
+          if (suggestionsData) setGradeSuggestions(suggestionsData);
+          if (publicCircuitsData) setPublicCircuits(publicCircuitsData);
         };
-        loadUserSends();
+        loadGlobalData();
+      }, []);
+
+      // Load all user-specific data when user is set
+      useEffect(() => {
+        if (!currentUserId) {
+          setIsLoading(false);
+          return;
+        }
+
+        const loadUserData = async () => {
+          // Load attempts with legacy migration
+          let attemptsData = await loadJSON(`user-attempts:${currentUserId}`);
+          if (!attemptsData) {
+            attemptsData = await loadJSON('user-attempts');
+            if (attemptsData) {
+              await window.storage.set(`user-attempts:${currentUserId}`, JSON.stringify(attemptsData));
+            }
+          }
+
+          const [
+            sendsData, friendsData, ratingsData, notificationsData,
+            profilePicData, sessionData, projectsData, circuitsData,
+            circuitClearsData, personalNotesData, sessionHistoryData
+          ] = await Promise.all([
+            loadJSON(`sends:${currentUserId}`),
+            loadJSON(`friends:${currentUserId}`),
+            loadJSON(`user-ratings:${currentUserId}`),
+            loadJSON(`notifications:${currentUserId}`),
+            loadRaw(`profile-picture:${currentUserId}`),
+            loadJSON(`active-session:${currentUserId}`),
+            loadJSON(`projects:${currentUserId}`),
+            loadJSON(`circuits:${currentUserId}`),
+            loadJSON(`circuit-clears:${currentUserId}`),
+            loadJSON(`personal-notes:${currentUserId}`),
+            loadJSON(`session-history:${currentUserId}`),
+          ]);
+
+          if (sendsData) setUserSends(sendsData);
+          if (friendsData) setFriends(friendsData);
+          if (attemptsData) setAttempts(attemptsData);
+          if (ratingsData) setUserRatings(ratingsData);
+          if (notificationsData) setNotifications(notificationsData);
+          if (profilePicData) setProfilePicture(profilePicData);
+          if (sessionData) {
+            setActiveSession(sessionData);
+            setSessionProblems(sessionData.problems || []);
+          }
+          if (projectsData) setProjects(projectsData);
+          if (circuitsData) setCircuits(circuitsData);
+          if (circuitClearsData) setCircuitClears(circuitClearsData);
+          if (personalNotesData) setPersonalNotes(personalNotesData);
+          if (sessionHistoryData) setSessionHistory(sessionHistoryData);
+
+          setIsLoading(false);
+        };
+        loadUserData();
       }, [currentUserId]);
-
-      // Note: User initialization is now handled by Firebase Auth listener
-      // The old localStorage-based init is no longer needed since we use Google auth
-
-      // Load all users on mount
-      useEffect(() => {
-        const loadAllUsers = async () => {
-          try {
-            const usersResult = await window.storage.get('all-users');
-            if (usersResult) {
-              setAllUsers(JSON.parse(usersResult.value));
-            }
-          } catch (error) {
-            console.log('No users data yet');
-          }
-        };
-        loadAllUsers();
-      }, []);
-
-      // Load friends when user is set
-      useEffect(() => {
-        const loadFriends = async () => {
-          if (currentUserId) {
-            try {
-              const friendsResult = await window.storage.get(`friends:${currentUserId}`);
-              if (friendsResult) {
-                setFriends(JSON.parse(friendsResult.value));
-              }
-            } catch (error) {
-              console.log('No friends data yet');
-            }
-          }
-        };
-        loadFriends();
-      }, [currentUserId]);
-
-      // Load comments
-      useEffect(() => {
-        const loadComments = async () => {
-          try {
-            const result = await window.storage.get('all-comments');
-            if (result) {
-              setComments(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No comments yet');
-          }
-        };
-        loadComments();
-      }, []);
-
-      // Load attempts
-      useEffect(() => {
-        const loadAttempts = async () => {
-          try {
-            const result = await window.storage.get('user-attempts');
-            if (result) {
-              setAttempts(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No attempts yet');
-          }
-        };
-        loadAttempts();
-      }, []);
 
       // Reset detail view zoom when problem changes
       useEffect(() => {
@@ -719,179 +777,7 @@
         setDetailPosition({ x: 0, y: 0 });
       }, [selectedProblem?.id]);
 
-      // Load grade suggestions
-      useEffect(() => {
-        const loadGradeSuggestions = async () => {
-          try {
-            const result = await window.storage.get('grade-suggestions');
-            if (result) {
-              setGradeSuggestions(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No grade suggestions yet');
-          }
-        };
-        loadGradeSuggestions();
-      }, []);
-
-      // Load user ratings
-      useEffect(() => {
-        const loadUserRatings = async () => {
-          try {
-            const result = await window.storage.get(`user-ratings:${currentUserId}`);
-            if (result) {
-              setUserRatings(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No user ratings yet');
-          }
-        };
-        if (currentUserId) loadUserRatings();
-      }, [currentUserId]);
-
-      // Load notifications
-      useEffect(() => {
-        const loadNotifications = async () => {
-          try {
-            const result = await window.storage.get(`notifications:${currentUserId}`);
-            if (result) {
-              setNotifications(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No notifications yet');
-          }
-        };
-        if (currentUserId) loadNotifications();
-      }, [currentUserId]);
-
-      // Load profile picture
-      useEffect(() => {
-        const loadProfilePicture = async () => {
-          try {
-            const result = await window.storage.get(`profile-picture:${currentUserId}`);
-            if (result) {
-              setProfilePicture(result.value);
-            }
-          } catch (error) {
-            console.log('No profile picture yet');
-          }
-        };
-        if (currentUserId) loadProfilePicture();
-      }, [currentUserId]);
-
-      // Load active session
-      useEffect(() => {
-        const loadSession = async () => {
-          try {
-            const result = await window.storage.get(`active-session:${currentUserId}`);
-            if (result) {
-              const session = JSON.parse(result.value);
-              setActiveSession(session);
-              setSessionProblems(session.problems || []);
-            }
-          } catch (error) {
-            console.log('No active session');
-          }
-        };
-        if (currentUserId) loadSession();
-      }, [currentUserId]);
-
-      // Load projects
-      useEffect(() => {
-        const loadProjects = async () => {
-          try {
-            const result = await window.storage.get(`projects:${currentUserId}`);
-            if (result) {
-              setProjects(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No projects yet');
-          }
-        };
-        if (currentUserId) loadProjects();
-      }, [currentUserId]);
-
-      // Load circuits
-      useEffect(() => {
-        const loadCircuits = async () => {
-          try {
-            const result = await window.storage.get(`circuits:${currentUserId}`);
-            if (result) {
-              setCircuits(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No circuits yet');
-          }
-        };
-        if (currentUserId) loadCircuits();
-      }, [currentUserId]);
-
-      // Load public circuits
-      useEffect(() => {
-        const loadPublicCircuits = async () => {
-          try {
-            const result = await window.storage.get('public-circuits');
-            if (result) {
-              setPublicCircuits(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No public circuits yet');
-          }
-        };
-        loadPublicCircuits();
-      }, []);
-
-      // Load user's circuit clears
-      useEffect(() => {
-        const loadCircuitClears = async () => {
-          try {
-            const result = await window.storage.get(`circuit-clears:${currentUserId}`);
-            if (result) {
-              setCircuitClears(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No circuit clears yet');
-          }
-        };
-        if (currentUserId) loadCircuitClears();
-      }, [currentUserId]);
-
-      // Load personal notes
-      useEffect(() => {
-        const loadPersonalNotes = async () => {
-          try {
-            const result = await window.storage.get(`personal-notes:${currentUserId}`);
-            if (result) {
-              setPersonalNotes(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No personal notes yet');
-          }
-        };
-        if (currentUserId) loadPersonalNotes();
-      }, [currentUserId]);
-
-      // Load session history
-      useEffect(() => {
-        const loadSessionHistory = async () => {
-          try {
-            const result = await window.storage.get(`session-history:${currentUserId}`);
-            if (result) {
-              setSessionHistory(JSON.parse(result.value));
-            }
-          } catch (error) {
-            console.log('No session history yet');
-          }
-          setIsLoading(false);
-        };
-        if (currentUserId) {
-          loadSessionHistory();
-        } else {
-          setIsLoading(false);
-        }
-      }, [currentUserId]);
-
-      // Load activity feed and migrate missing data from user sends
+      // Load activity feed and migrate missing data from user sends (once)
       useEffect(() => {
         const loadActivityFeed = async () => {
           try {
@@ -899,51 +785,49 @@
             if (result) {
               let feed = JSON.parse(result.value);
 
-              // Migration: enrich send activities with grade/rating data from all users' sends
-              const usersResult = await window.storage.get('all-users');
-              if (usersResult) {
-                const users = JSON.parse(usersResult.value);
-                const allUserSends = [];
+              // One-time migration: enrich send activities with grade/rating data
+              const migrated = localStorage.getItem('activity-feed-migrated');
+              if (!migrated) {
+                const usersResult = await window.storage.get('all-users');
+                if (usersResult) {
+                  const users = JSON.parse(usersResult.value);
+                  const allUserSends = [];
 
-                // Load sends from all users
-                for (const user of users) {
-                  try {
-                    const sendsResult = await window.storage.get(`sends:${user.id}`);
-                    if (sendsResult) {
-                      const sends = JSON.parse(sendsResult.value);
-                      allUserSends.push(...sends.map(s => ({ ...s, userId: user.id })));
+                  for (const user of users) {
+                    try {
+                      const sendsResult = await window.storage.get(`sends:${user.id}`);
+                      if (sendsResult) {
+                        const sends = JSON.parse(sendsResult.value);
+                        allUserSends.push(...sends.map(s => ({ ...s, userId: user.id })));
+                      }
+                    } catch (e) {}
+                  }
+
+                  let updated = false;
+                  feed = feed.map(activity => {
+                    if (activity.type === 'send' && (!activity.suggestedGrade || activity.rating === undefined)) {
+                      const matchingSend = allUserSends.find(s =>
+                        s.problemId === activity.problemId &&
+                        s.userId === activity.userId &&
+                        Math.abs(new Date(s.timestamp).getTime() - new Date(activity.timestamp).getTime()) < 60000
+                      );
+                      if (matchingSend) {
+                        updated = true;
+                        return {
+                          ...activity,
+                          suggestedGrade: activity.suggestedGrade || matchingSend.suggestedGrade || matchingSend.grade,
+                          rating: activity.rating !== undefined ? activity.rating : (matchingSend.rating || 0)
+                        };
+                      }
                     }
-                  } catch (e) {
-                    // Skip if no sends for this user
+                    return activity;
+                  });
+
+                  if (updated) {
+                    await window.storage.set('activity-feed', JSON.stringify(feed));
                   }
                 }
-
-                // Enrich activity feed entries with missing data
-                let updated = false;
-                feed = feed.map(activity => {
-                  if (activity.type === 'send' && (!activity.suggestedGrade || activity.rating === undefined)) {
-                    // Find matching send from user sends
-                    const matchingSend = allUserSends.find(s =>
-                      s.problemId === activity.problemId &&
-                      s.userId === activity.userId &&
-                      Math.abs(new Date(s.timestamp).getTime() - new Date(activity.timestamp).getTime()) < 60000
-                    );
-                    if (matchingSend) {
-                      updated = true;
-                      return {
-                        ...activity,
-                        suggestedGrade: activity.suggestedGrade || matchingSend.suggestedGrade || matchingSend.grade,
-                        rating: activity.rating !== undefined ? activity.rating : (matchingSend.rating || 0)
-                      };
-                    }
-                  }
-                  return activity;
-                });
-
-                // Save updated feed if changes were made
-                if (updated) {
-                  await window.storage.set('activity-feed', JSON.stringify(feed));
-                }
+                localStorage.setItem('activity-feed-migrated', 'true');
               }
 
               setActivityFeed(feed);
@@ -979,7 +863,7 @@
         const y = ((e.clientY - rect.top) / rect.height) * 100;
 
         const newHold = {
-          id: Date.now(),
+          id: uniqueId(),
           x: x,
           y: y,
           type: currentHoldType,
@@ -1105,7 +989,7 @@
               // Only place if within bounds
               if (x >= 0 && x <= 100 && y >= 0 && y <= 100) {
                 const newHold = {
-                  id: Date.now(),
+                  id: uniqueId(),
                   x: x,
                   y: y,
                   type: currentHoldType,
@@ -1243,17 +1127,17 @@
         const finishHolds = holds.filter(h => h.type === 'finish');
 
         if (!problemName || holds.length < 2) {
-          alert('Please add a name and select at least 2 holds');
+          showToast('Please add a name and select at least 2 holds', 'error');
           return;
         }
 
         if (!wallImage) {
-          alert('Please upload a wall photo first');
+          showToast('Please upload a wall photo first', 'error');
           return;
         }
 
         if (startHolds.length === 0 || finishHolds.length === 0) {
-          alert('Please mark at least one start hold (green) and one finish hold (red)');
+          showToast('Please mark at least one start hold (green) and one finish hold (red)', 'error');
           return;
         }
 
@@ -1309,7 +1193,16 @@
               });
             }
             setAllUsers(updatedUsers);
-            await window.storage.set('all-users', JSON.stringify(updatedUsers));
+            await window.storage.update('all-users', (current) => {
+              const users = current || [];
+              const idx = users.findIndex(u => u.id === currentUserId);
+              if (idx !== -1) {
+                users[idx].problemsCreated = (users[idx].problemsCreated || 0) + 1;
+              } else {
+                users.push({ id: currentUserId, name: currentUserName, problemsCreated: 1, totalSends: 0, highestGrade: 'V0' });
+              }
+              return users;
+            });
           }
 
           // Reset form
@@ -1328,7 +1221,7 @@
           setActiveTab('archive');
         } catch (error) {
           console.error('Error saving problem:', error);
-          alert('Failed to save problem: ' + (error.message || 'Unknown error. Try using a smaller image.'));
+          showToast('Failed to save problem: ' + (error.message || 'Unknown error. Try using a smaller image.'), 'error');
         }
       };
 
@@ -1459,7 +1352,7 @@
           const updatedProblems = [...problems];
           updatedProblems[problemIndex] = updatedProblem;
           setProblems(updatedProblems);
-          await window.storage.set('problems', JSON.stringify(updatedProblems));
+          await window.storage.set(`problem:${send.problemId}`, JSON.stringify(updatedProblem));
         }
       };
 
@@ -1616,7 +1509,19 @@
         try {
           await window.storage.set(`problem:${problemId}`, JSON.stringify(updatedProblem));
           await window.storage.set(`sends:${currentUserId}`, JSON.stringify(updatedUserSends));
-          await window.storage.set('all-users', JSON.stringify(updatedUsers));
+          await window.storage.update('all-users', (current) => {
+            const users = current || [];
+            const idx = users.findIndex(u => u.id === currentUserId);
+            if (idx !== -1) {
+              users[idx].totalSends = (users[idx].totalSends || 0) + 1;
+              const gi = grades.indexOf(updatedProblem.grade);
+              const ch = grades.indexOf(users[idx].highestGrade || 'V0');
+              if (gi > ch) users[idx].highestGrade = updatedProblem.grade;
+            } else {
+              users.push({ id: currentUserId, name: currentUserName, problemsCreated: 0, totalSends: 1, highestGrade: updatedProblem.grade });
+            }
+            return users;
+          });
           const newProblems = [...problems];
           newProblems[problemIndex] = updatedProblem;
           setProblems(newProblems);
@@ -1766,16 +1671,19 @@
       // Activity feed function
       const addActivity = async (activity) => {
         const newActivity = {
-          id: Date.now(),
+          id: uniqueId(),
           userId: currentUserId,
           userName: currentUserName,
           timestamp: new Date().toISOString(),
           ...activity
         };
-        const updatedFeed = [newActivity, ...activityFeed].slice(0, 100); // Keep last 100 activities
+        const updatedFeed = [newActivity, ...activityFeed].slice(0, 100);
         setActivityFeed(updatedFeed);
         try {
-          await window.storage.set('activity-feed', JSON.stringify(updatedFeed));
+          await window.storage.update('activity-feed', (current) => {
+            const feed = current || [];
+            return [newActivity, ...feed].slice(0, 100);
+          });
         } catch (error) {
           console.error('Error saving activity:', error);
         }
@@ -1784,7 +1692,7 @@
       // Video beta functions
       const addVideoBeta = async (problemId, videoData) => {
         const newVideo = {
-          id: Date.now(),
+          id: uniqueId(),
           problemId,
           userId: currentUserId,
           userName: currentUserName,
@@ -1829,10 +1737,18 @@
 
       const updateUserName = async (newName) => {
         setCurrentUserName(newName);
+
+        // Preserve existing user data (especially createdAt/joinedAt)
+        let existingUser = {};
+        try {
+          const existing = await window.storage.get('current-user');
+          if (existing) existingUser = JSON.parse(existing.value);
+        } catch (e) {}
+
         const user = {
+          ...existingUser,
           id: currentUserId,
-          name: newName,
-          createdAt: new Date().toISOString()
+          name: newName
         };
 
         try {
@@ -1892,7 +1808,7 @@
       // Comment functions
       const addComment = async (problemId, commentText, isBetaSpoiler = false) => {
         const newCommentObj = {
-          id: Date.now(),
+          id: uniqueId(),
           text: commentText,
           userId: currentUserId,
           userName: currentUserName,
@@ -1912,7 +1828,11 @@
         setIsSpoiler(false);
 
         try {
-          await window.storage.set('all-comments', JSON.stringify(updatedComments));
+          await window.storage.update('all-comments', (current) => {
+            const all = current || {};
+            const existing = all[problemId] || [];
+            return { ...all, [problemId]: [...existing, newCommentObj] };
+          });
 
           const problem = problems.find(p => p.id === problemId);
           if (problem && problem.setterId !== currentUserId) {
@@ -1946,7 +1866,24 @@
         setComments(updatedComments);
 
         try {
-          await window.storage.set('all-comments', JSON.stringify(updatedComments));
+          await window.storage.update('all-comments', (current) => {
+            const all = current || {};
+            const existing = all[problemId] || [];
+            return {
+              ...all,
+              [problemId]: existing.map(c => {
+                if (c.id === commentId) {
+                  const likes = c.likes || [];
+                  if (likes.includes(currentUserId)) {
+                    return { ...c, likes: likes.filter(id => id !== currentUserId) };
+                  } else {
+                    return { ...c, likes: [...likes, currentUserId] };
+                  }
+                }
+                return c;
+              })
+            };
+          });
         } catch (error) {
           console.error('Error liking comment:', error);
         }
@@ -1982,7 +1919,7 @@
         }
 
         try {
-          await window.storage.set('user-attempts', JSON.stringify(updatedAttempts));
+          await window.storage.set(`user-attempts:${currentUserId}`, JSON.stringify(updatedAttempts));
         } catch (error) {
           console.error('Error logging attempt:', error);
         }
@@ -1995,7 +1932,7 @@
         setAttempts(updatedAttempts);
 
         try {
-          await window.storage.set('user-attempts', JSON.stringify(updatedAttempts));
+          await window.storage.set(`user-attempts:${currentUserId}`, JSON.stringify(updatedAttempts));
         } catch (error) {
           console.error('Error updating notes:', error);
         }
@@ -2070,7 +2007,7 @@
             .filter(p => p);
         }
         // Default to archive (filtered problems)
-        return getSortedAndFilteredProblems();
+        return getSortedAndFilteredProblems;
       };
 
       // Navigate to next/previous problem in the list
@@ -2193,7 +2130,7 @@
         try {
           const result = await window.storage.get(`notifications:${userId}`);
           const existingNotifications = result ? JSON.parse(result.value) : [];
-          const updatedNotifications = [{ ...notification, id: Date.now(), read: false }, ...existingNotifications].slice(0, 50);
+          const updatedNotifications = [{ ...notification, id: uniqueId(), read: false }, ...existingNotifications].slice(0, 50);
           await window.storage.set(`notifications:${userId}`, JSON.stringify(updatedNotifications));
 
           if (userId === currentUserId) {
@@ -2229,7 +2166,7 @@
       // Session functions
       const startSession = async () => {
         const newSession = {
-          id: Date.now(),
+          id: uniqueId(),
           startTime: new Date().toISOString(),
           problems: []
         };
@@ -2286,7 +2223,7 @@
       const createCircuit = async (name) => {
         if (!name.trim()) return;
         const newCircuit = {
-          id: Date.now(),
+          id: uniqueId(),
           name: name.trim(),
           problemIds: [],
           createdAt: new Date().toISOString(),
@@ -2368,7 +2305,7 @@
       const createPublicCircuit = async (name, description, problemIds) => {
         if (!name.trim()) return;
         const newCircuit = {
-          id: `public_circuit_${Date.now()}`,
+          id: `public_circuit_${uniqueId()}`,
           name: name.trim(),
           description: description.trim(),
           problemIds: problemIds || [],
@@ -2493,7 +2430,7 @@
       const copyShareLink = (problemId) => {
         const link = getShareLink(problemId);
         navigator.clipboard.writeText(link).then(() => {
-          alert('Link copied to clipboard!');
+          showToast('Link copied to clipboard!', 'success');
         }).catch(() => {
           prompt('Copy this link:', link);
         });
@@ -2598,7 +2535,7 @@
         });
       };
 
-      const getSortedAndFilteredProblems = () => {
+      const getSortedAndFilteredProblems = useMemo(() => {
         let filtered = problems;
 
         if (climbFilter !== 'mine') {
@@ -2643,7 +2580,6 @@
             case 'difficulty':
               return grades.indexOf(b.grade) - grades.indexOf(a.grade);
             case 'circuits':
-              // Sort by number of circuits the problem is in, then by newest
               const aCircuits = publicCircuits.filter(c => c.problemIds.includes(a.id)).length;
               const bCircuits = publicCircuits.filter(c => c.problemIds.includes(b.id)).length;
               if (bCircuits !== aCircuits) return bCircuits - aCircuits;
@@ -2655,7 +2591,7 @@
         });
 
         return sorted;
-      };
+      }, [problems, climbFilter, currentUserId, friends, filterGradeMin, filterGradeMax, filterTags, searchTerm, sortBy, publicCircuits]);
 
       const getLeaderboardData = () => {
         const gradeStats = {};
@@ -2765,6 +2701,23 @@
 
       return (
         <div className="min-h-screen bg-zinc-950 text-white pb-20" style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", sans-serif' }}>
+          {/* Toast notifications */}
+          <div className="fixed top-4 left-1/2 transform -translate-x-1/2 z-[60] flex flex-col gap-2 pointer-events-none">
+            {toasts.map(toast => (
+              <div
+                key={toast.id}
+                className={`px-4 py-3 rounded-lg shadow-lg text-sm font-medium pointer-events-auto animate-pulse ${
+                  toast.type === 'error' ? 'bg-red-900/90 border border-red-700 text-red-100' :
+                  toast.type === 'success' ? 'bg-green-900/90 border border-green-700 text-green-100' :
+                  'bg-zinc-800/90 border border-zinc-600 text-white'
+                }`}
+                style={{ animation: 'fadeIn 0.2s ease-out' }}
+              >
+                {toast.message}
+              </div>
+            ))}
+          </div>
+
           {/* Saving indicator */}
           {isSaving && (
             <div className="fixed top-4 right-4 bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 flex items-center gap-2 z-50 shadow-lg">
@@ -4603,7 +4556,7 @@
                           const file = e.target.files[0];
                           if (file) {
                             if (file.size > 50 * 1024 * 1024) {
-                              alert('Video must be under 50MB');
+                              showToast('Video must be under 50MB', 'error');
                               return;
                             }
                             const reader = new FileReader();
@@ -5019,7 +4972,7 @@
                       ))
                     )
                   ) : (
-                    getSortedAndFilteredProblems().length === 0 ? (
+                    getSortedAndFilteredProblems.length === 0 ? (
                       <div className="bg-zinc-900 rounded-lg p-12 text-center border border-zinc-800">
                         <p className="text-zinc-500 text-lg font-bold uppercase tracking-wide">No problems found. Create your first one!</p>
                       </div>
@@ -5028,7 +4981,7 @@
                         {/* Mobile vertical scroll view */}
                         <div className="md:hidden">
                           <div className="space-y-4">
-                            {getSortedAndFilteredProblems().map(problem => (
+                            {getSortedAndFilteredProblems.map(problem => (
                               <div
                                 key={problem.id}
                                 className="bg-zinc-900 rounded-lg p-4 border border-zinc-800 shadow-xl"
@@ -5118,7 +5071,7 @@
 
                         {/* Desktop list view */}
                         <div className="hidden md:block space-y-4">
-                          {getSortedAndFilteredProblems().map(problem => (
+                          {getSortedAndFilteredProblems.map(problem => (
                             <div
                               key={problem.id}
                               className="bg-zinc-900 rounded-lg p-6 border border-zinc-800 shadow-xl hover:border-orange-600 transition cursor-pointer"
@@ -6126,7 +6079,7 @@
                               mergeUsers(oldUser, newUser);
                             }
                           } else {
-                            alert('Please select or enter two different users');
+                            showToast('Please select or enter two different users', 'error');
                           }
                         }}
                         className="bg-red-600 hover:bg-red-500 px-4 py-2 rounded font-bold uppercase text-sm transition"
