@@ -107,13 +107,15 @@
       },
       list: async (prefix) => {
         try {
-          // For listing, we need to query Firestore
-          const snapshot = await db.collection('data').get();
+          // Use range query to only fetch docs matching the prefix
+          const end = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+          const snapshot = await db.collection('data')
+            .where(firebase.firestore.FieldPath.documentId(), '>=', prefix)
+            .where(firebase.firestore.FieldPath.documentId(), '<', end)
+            .get();
           const keys = [];
           snapshot.forEach(doc => {
-            if (doc.id.startsWith(prefix)) {
-              keys.push(doc.id);
-            }
+            keys.push(doc.id);
           });
           return { keys };
         } catch (e) {
@@ -269,6 +271,9 @@
       const detailSwipeStartRef = useRef(null);
       const lastTouchDistance = useRef(null);
       const detailImageRef = useRef(null);
+      const wallOverlayRef = useRef(null);
+      const holdTouchStartTime = useRef(0);
+      const holdTouchHandled = useRef(false);
 
       const grades = ['V0', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8', 'V9', 'V10', 'V11', 'V12', 'V13', 'V14'];
       const availableTags = ['crimpy', 'sloper', 'powerful', 'technical', 'compression', 'dynamic', 'static', 'overhang', 'slab', 'vertical', 'roof', 'pinchy', 'endurance', 'replica'];
@@ -1084,12 +1089,7 @@
 
           // Quick tap (< 250ms) and didn't move much = place hold
           if (timeDiff < 250 && !touchStartRef.current.moved && !longPressTriggered.current) {
-            const container = e.currentTarget;
-
-            // Find the overlay div (the one with position absolute that contains holds)
-            // It's nested: container > transform wrapper > img + overlay
-            const transformWrapper = container.querySelector('div');
-            const overlay = transformWrapper?.querySelector('div');
+            const overlay = wallOverlayRef.current;
 
             if (overlay) {
               const overlayRect = overlay.getBoundingClientRect();
@@ -4020,7 +4020,7 @@
                   <div className="bg-zinc-900 rounded-lg p-6 border border-zinc-800 shadow-xl">
                     <div
                       className="relative overflow-hidden bg-black rounded touch-none"
-                      style={{ height: '70vh', maxHeight: '600px', minHeight: '300px', cursor: isDragging ? 'grabbing' : 'crosshair' }}
+                      style={{ height: '70vh', maxHeight: '600px', minHeight: '300px', cursor: isDragging ? 'grabbing' : 'crosshair', WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
                       onMouseDown={handleMouseDown}
                       onMouseMove={handleMouseMove}
                       onMouseUp={handleMouseUp}
@@ -4052,6 +4052,7 @@
                           draggable={false}
                         />
                         <div
+                          ref={wallOverlayRef}
                           onClick={handleImageClick}
                           onContextMenu={(e) => e.preventDefault()}
                           style={{
@@ -4076,6 +4077,10 @@
                                 changeHoldType(hold.id, nextType);
                               }
                             };
+                            // Visual size for the dot itself
+                            const dotSize = hold.type === 'foot' ? 14 : (hold.type === 'start' || hold.type === 'finish' ? 20 : 16);
+                            // Minimum 44px touch target on mobile
+                            const touchSize = Math.max(dotSize, 44);
                             return (
                               <div
                                 key={hold.id}
@@ -4084,10 +4089,33 @@
                                   e.stopPropagation();
                                   removeHold(hold.id);
                                 }}
-                                onClick={cycleHold}
+                                onTouchStart={(e) => {
+                                  // Mark that touch started on a hold so parent doesn't place a new one
+                                  e.stopPropagation();
+                                  holdTouchStartTime.current = Date.now();
+                                  holdTouchHandled.current = false;
+                                }}
                                 onTouchEnd={(e) => {
                                   e.preventDefault();
                                   e.stopPropagation();
+                                  // Only cycle if it was a quick tap (not a drag)
+                                  const elapsed = Date.now() - holdTouchStartTime.current;
+                                  if (elapsed < 300) {
+                                    cycleHold(e);
+                                    holdTouchHandled.current = true;
+                                  }
+                                  // Clear parent's touchStartRef so no ghost hold gets placed
+                                  touchStartRef.current = null;
+                                }}
+                                onClick={(e) => {
+                                  // On touch devices, onTouchEnd already handled the cycle
+                                  if (holdTouchHandled.current) {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    holdTouchHandled.current = false;
+                                    return;
+                                  }
+                                  // Desktop click
                                   cycleHold(e);
                                 }}
                                 style={{
@@ -4095,19 +4123,32 @@
                                   left: `${hold.x}%`,
                                   top: `${hold.y}%`,
                                   transform: 'translate(-50%, -50%)',
-                                  width: hold.type === 'foot' ? '14px' : (hold.type === 'start' || hold.type === 'finish' ? '20px' : '16px'),
-                                  height: hold.type === 'foot' ? '14px' : (hold.type === 'start' || hold.type === 'finish' ? '20px' : '16px'),
+                                  width: `${touchSize}px`,
+                                  height: `${touchSize}px`,
+                                  borderRadius: '50%',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  cursor: 'pointer',
+                                  zIndex: 10,
+                                  touchAction: 'none',
+                                  WebkitTouchCallout: 'none',
+                                  WebkitUserSelect: 'none',
+                                }}
+                                title={`${hold.type} hold - Tap to change type (removes after finish)`}
+                              >
+                                {/* Visual dot */}
+                                <div style={{
+                                  width: `${dotSize}px`,
+                                  height: `${dotSize}px`,
                                   borderRadius: '50%',
                                   backgroundColor: getHoldColorByType(hold.type),
                                   opacity: 0.7,
-                                  cursor: 'pointer',
                                   boxShadow: `0 0 0 1px ${getHoldColorByType(hold.type)}, 0 0 8px ${getHoldColorByType(hold.type)}, 0 2px 6px rgba(0,0,0,0.8)`,
-                                  zIndex: 10,
-                                  touchAction: 'none',
+                                  pointerEvents: 'none',
                                   ...getHoldBorderStyle(hold.type)
-                                }}
-                                title={`${hold.type} hold - Tap to change type (removes after finish)`}
-                              />
+                                }} />
+                              </div>
                             );
                           })}
                         </div>
